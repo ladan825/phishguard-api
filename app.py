@@ -4,13 +4,34 @@ import joblib
 import numpy as np
 import sqlite3
 from datetime import datetime
+import os
+import gdown
 
 app = Flask(__name__)
 CORS(app)
 
+THRESHOLD = 0.65
+
+# ── Download model files from Google Drive if not present ──
+def download_models():
+    if not os.path.exists('phishing_model.pkl'):
+        print("Downloading model...")
+        gdown.download(
+            'https://drive.google.com/uc?id=1xh2cKcALIgmS6mvkDPYCWjxR9qAl4uUs',
+            'phishing_model.pkl', quiet=False
+        )
+    if not os.path.exists('vectorizer.pkl'):
+        print("Downloading vectorizer...")
+        gdown.download(
+            'https://drive.google.com/uc?id=1StF2zFfEEFyNWGMvR0IdTYcVmYcbzDcZ',
+            'vectorizer.pkl', quiet=False
+        )
+
+download_models()
+
 model = joblib.load('phishing_model.pkl')
 vectorizer = joblib.load('vectorizer.pkl')
-THRESHOLD = 0.65
+print("Model loaded!")
 
 # ── Database ───────────────────────────────────────────────
 def init_db():
@@ -127,3 +148,5 @@ def health():
 if __name__ == '__main__':
     init_db()
     app.run(debug=True, port=5000)
+
+init_db()
