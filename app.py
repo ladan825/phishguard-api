@@ -16,7 +16,7 @@ CORS(app, origins=[
 
 THRESHOLD = 0.65
 
-# ── Download model files from Google Drive if not present ──
+# ── Download models ────────────────────────────────────────
 def download_models():
     if not os.path.exists('phishing_model.pkl'):
         print("Downloading model...")
@@ -33,8 +33,9 @@ def download_models():
 
 download_models()
 
-model = joblib.load('phishing_model.pkl')
-vectorizer = joblib.load('vectorizer.pkl')
+# ── Load with explicit names ───────────────────────────────
+ensemble_model = joblib.load('phishing_model.pkl')
+tfidf_vectorizer = joblib.load('vectorizer.pkl')
 print("Model loaded!")
 
 # ── Database ───────────────────────────────────────────────
@@ -84,9 +85,9 @@ def get_stats():
 
 # ── Keywords ───────────────────────────────────────────────
 def get_keywords(vec):
-    feature_names = vectorizer.get_feature_names_out()
+    feature_names = tfidf_vectorizer.get_feature_names_out()
     tfidf_scores = vec.toarray()[0]
-    rf_model = model.named_estimators_['rf']
+    rf_model = ensemble_model.named_estimators_['rf']
     importances = rf_model.feature_importances_
     combined_scores = tfidf_scores * importances
     nonzero = np.where(tfidf_scores > 0)[0]
@@ -103,8 +104,8 @@ def predict():
     if not text:
         return jsonify({'error': 'No text provided'}), 400
 
-    vec = vectorizer.transform([text])
-    prob_phishing = model.predict_proba(vec)[0][1]
+    vec = tfidf_vectorizer.transform([text])
+    prob_phishing = ensemble_model.predict_proba(vec)[0][1]
     is_phishing = prob_phishing >= THRESHOLD
     confidence = round(float(prob_phishing if is_phishing else 1 - prob_phishing) * 100, 2)
     keywords = get_keywords(vec)
