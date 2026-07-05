@@ -21,19 +21,19 @@ def download_models():
     if not os.path.exists('phishing_model.pkl'):
         print("Downloading model...")
         gdown.download(
-            'https://drive.google.com/uc?id=1xh2cKcALIgmS6mvkDPYCWjxR9qAl4uUs',
+            'https://drive.google.com/uc?id=1StF2zFfEEFyNWGMvR0IdTYcVmYcbzDcZ',
             'phishing_model.pkl', quiet=False
         )
     if not os.path.exists('vectorizer.pkl'):
         print("Downloading vectorizer...")
         gdown.download(
-            'https://drive.google.com/uc?id=1StF2zFfEEFyNWGMvR0IdTYcVmYcbzDcZ',
+            'https://drive.google.com/uc?id=1xh2cKcALIgmS6mvkDPYCWjxR9qAl4uUs',
             'vectorizer.pkl', quiet=False
         )
 
 download_models()
 
-# ── Load with explicit names ───────────────────────────────
+# ── Load ───────────────────────────────────────────────────
 ensemble_model = joblib.load('phishing_model.pkl')
 tfidf_vectorizer = joblib.load('vectorizer.pkl')
 print("Model loaded!")
@@ -147,7 +147,10 @@ def history():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'running'})
+    return jsonify({
+        'status': 'running',
+        'version': '4.0'
+    })
 
 # ── Start ──────────────────────────────────────────────────
 if __name__ == '__main__':
