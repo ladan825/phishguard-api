@@ -8,7 +8,11 @@ import os
 import gdown
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://phishguard-gamma-ten.vercel.app",
+])
 
 THRESHOLD = 0.65
 
