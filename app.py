@@ -14,7 +14,12 @@ CORS(app, origins=[
     "https://phishguard-gamma-ten.vercel.app",
 ])
 
-THRESHOLD = 0.65
+# Raised from 0.65 -> 0.70 based on diagnostics: real false positives
+# ("submit your credentials/timesheet on Monday/Friday") scored 0.615-0.686,
+# while a genuine phishing example scored 0.810. 0.70 clears both false
+# positives while still catching real phishing. Re-tune against a full
+# labeled test set (precision/recall sweep) when you have one.
+THRESHOLD = 0.70
 
 # ── Download models ────────────────────────────────────────
 def download_models():
@@ -132,15 +137,20 @@ def history():
     try:
         conn = sqlite3.connect('phishguard.db')
         c = conn.cursor()
-        c.execute("SELECT id, result, confidence, keywords, timestamp FROM predictions ORDER BY id DESC LIMIT 20")
+        # NOTE: email_text is now included -- it was missing before, which
+        # meant history items loaded with no text to display.
+        c.execute("SELECT id, email_text, result, confidence, keywords, timestamp FROM predictions ORDER BY id DESC LIMIT 20")
         rows = c.fetchall()
         conn.close()
         return jsonify([{
             'id': r[0],
-            'result': r[1],
-            'confidence': r[2],
-            'keywords': r[3],
-            'timestamp': r[4]
+            'text': r[1],
+            'result': r[2],
+            'confidence': r[3],
+            # keywords is stored as a comma-joined string in the DB;
+            # split it back into a list so the frontend's .map() works.
+            'keywords': [k.strip() for k in r[4].split(',')] if r[4] else [],
+            'timestamp': r[5]
         } for r in rows])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
