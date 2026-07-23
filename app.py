@@ -6,7 +6,6 @@ import sqlite3
 from datetime import datetime
 import os
 import gdown
-import shap
 import traceback
 
 app = Flask(__name__)
@@ -32,44 +31,48 @@ tfidf_vectorizer = joblib.load('vectorizer.pkl')
 feature_names = np.array(tfidf_vectorizer.get_feature_names_out())
 print("Model loaded!")
 
-# ── Build SHAP explainers ONCE at startup (not per-request -- slow) ──
+# ── Fast, SHAP-free word contributions ─────────────────────
+# SHAP's TreeExplainer for a 300-tree RF + 200-tree XGB was too heavy
+# for this host -- it caused repeated worker timeouts / OOM kills, even
+# built lazily on first request. This approach uses only cheap,
+# already-computed data: RF/XGB's built-in feature_importances_ (no
+# explainer construction, no per-request tree traversal) for magnitude,
+# combined with LR's real signed coefficients for direction. It's an
+# approximation, not exact Shapley values, but it's ensemble-aware
+# (uses your real voting weights) and directionally correct, with
+# effectively zero extra compute cost per request.
 rf_model = ensemble_model.named_estimators_['rf']
 xgb_model = ensemble_model.named_estimators_['xgb']
 lr_model = ensemble_model.named_estimators_['lr']
 ENSEMBLE_WEIGHTS = dict(zip([name for name, _ in ensemble_model.estimators], ensemble_model.weights))
 TOTAL_WEIGHT = sum(ENSEMBLE_WEIGHTS.values())
 
-print("Building SHAP explainers...")
-rf_explainer = shap.TreeExplainer(rf_model)
-xgb_explainer = shap.TreeExplainer(xgb_model)
-print("SHAP explainers ready!")
+rf_importances = rf_model.feature_importances_
+xgb_importances = xgb_model.feature_importances_
+lr_coef = lr_model.coef_[0]
 
-def get_shap_contributions(vec):
-    """Returns [(word, weighted_contribution), ...] for words present in
-    the email, combining RF+LR+XGB using the SAME weights the
-    VotingClassifier uses. Positive = pushes toward phishing."""
-    vec_dense = vec.toarray()
+# Combined magnitude weight per feature, using RF+XGB voting weights
+# (LR is excluded here since it already provides its own signed value)
+_rf_xgb_weight = ENSEMBLE_WEIGHTS['rf'] + ENSEMBLE_WEIGHTS['xgb']
+combined_importance = (
+    ENSEMBLE_WEIGHTS['rf'] * rf_importances +
+    ENSEMBLE_WEIGHTS['xgb'] * xgb_importances
+) / _rf_xgb_weight
 
-    rf_shap = rf_explainer.shap_values(vec_dense)
-    rf_contrib = rf_shap[1][0] if isinstance(rf_shap, list) else (
-        rf_shap[0][:, 1] if rf_shap.ndim == 3 else rf_shap[0]
-    )
-
-    xgb_shap = xgb_explainer.shap_values(vec_dense)
-    xgb_contrib = xgb_shap[1][0] if isinstance(xgb_shap, list) else (
-        xgb_shap[0][:, 1] if xgb_shap.ndim == 3 else xgb_shap[0]
-    )
-
-    lr_contrib = vec_dense[0] * lr_model.coef_[0]
-
-    combined = (
-        ENSEMBLE_WEIGHTS['rf'] * rf_contrib +
-        ENSEMBLE_WEIGHTS['lr'] * lr_contrib +
-        ENSEMBLE_WEIGHTS['xgb'] * xgb_contrib
-    ) / TOTAL_WEIGHT
-
+def get_word_contributions(vec):
+    """Returns [(word, signed_contribution), ...] for words present in
+    the email. Positive = pushes toward phishing. Sign comes from LR's
+    coefficient (the only submodel with a real signed weight); magnitude
+    comes from RF+XGB's feature importances, scaled by TF-IDF presence."""
+    tfidf_scores = vec.toarray()[0]
     nonzero_idx = vec.nonzero()[1]
-    contributions = [(feature_names[i], float(combined[i])) for i in nonzero_idx]
+
+    contributions = []
+    for i in nonzero_idx:
+        magnitude = tfidf_scores[i] * combined_importance[i]
+        direction = 1 if lr_coef[i] >= 0 else -1
+        contributions.append((feature_names[i], direction * magnitude))
+
     contributions.sort(key=lambda x: -x[1])
     return contributions
 
@@ -201,7 +204,7 @@ def predict():
         confidence = round(float(prob_phishing if is_phishing else 1 - prob_phishing) * 100, 2)
         result = 'PHISHING' if is_phishing else 'SAFE'
 
-        contributions = get_shap_contributions(vec)
+        contributions = get_word_contributions(vec)
         keywords = [w for w, s in (contributions if is_phishing else contributions[::-1])][:5]
         explanation = generate_explanation(text, result, confidence, contributions)
 

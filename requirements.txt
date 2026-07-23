@@ -7,5 +7,4 @@ pandas
 joblib
 gunicorn
 gdown 
-shap
 anthropic
