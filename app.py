@@ -95,21 +95,27 @@ def get_shap_keywords(vec, is_phishing):
 
 # ── NLP Explanation via Anthropic ──────────────────────────
 def get_nlp_explanation(email_text, result, confidence, shap_words):
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        word_list = ', '.join(shap_words) if shap_words else 'none identified'
-        prompt = f"""You are a cybersecurity analyst. Analyse this email and explain in exactly 2 clear sentences why it was classified as {result} with {confidence}% confidence. The most influential words were: {word_list}. Be specific about the EMAIL CONTENT — explain what features of this specific email led to the classification. Do not be generic. Email: "{email_text[:400]}" """
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=120,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return message.content[0].text
-    except Exception as e:
-        print(f"Explanation error: {e}")
-        return None
+    """Generate plain English explanation using SHAP words — no API needed"""
+    if not shap_words:
+        if result == 'PHISHING':
+            return f"This email was flagged as phishing with {confidence}% confidence based on its overall linguistic pattern, which closely resembles known phishing email content in the training data."
+        else:
+            return f"This email appears legitimate with {confidence}% confidence. Its content and phrasing are consistent with normal communication patterns found in legitimate emails."
+
+    word_list = ', '.join(f'"{w}"' for w in shap_words[:3])
+
+    if result == 'PHISHING':
+        if confidence >= 90:
+            return f"This email is highly likely to be a phishing attempt. The terms {word_list} are strongly associated with phishing campaigns in the model's training data, and the overall pattern of language used matches known malicious email templates with {confidence}% confidence."
+        elif confidence >= 75:
+            return f"This email shows significant phishing indicators. The presence of {word_list} contributed most to this classification, as these terms frequently appear in emails designed to deceive recipients into disclosing sensitive information."
+        else:
+            return f"This email was flagged as potentially suspicious. The terms {word_list} appear in patterns associated with phishing emails, though the confidence level of {confidence}% suggests some ambiguity — exercise caution before responding or clicking any links."
+    else:
+        if confidence >= 80:
+            return f"This email appears legitimate. The terms {word_list} are characteristic of normal institutional or personal communication and do not match patterns associated with phishing attempts in the training data."
+        else:
+            return f"This email is likely legitimate but the classification is borderline at {confidence}% confidence. The terms {word_list} suggest genuine communication, however verify the sender's identity before sharing any sensitive information."
 
 # ── Routes ─────────────────────────────────────────────────
 @app.route('/predict', methods=['POST'])
