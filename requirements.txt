@@ -6,4 +6,6 @@ numpy==2.3.5
 pandas
 joblib
 gunicorn
-gdown
+gdown 
+shap
+anthropic
