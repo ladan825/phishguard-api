@@ -1,5 +1,3 @@
-from streamlit import text
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import joblib
@@ -120,11 +118,12 @@ def predict():
     text = data.get('text', '').strip()
     if not text:
         return jsonify({'error': 'No text provided'}), 400
+
     # Short email guard — also catches greetings and casual messages
-word_count = len(text.split())
-SAFE_PATTERNS = ['hi', 'hey', 'hello', 'ok', 'okay', 'thanks', 'thank you',
-                 'yes', 'no', 'sure', 'noted', 'alright', 'bye', 'goodbye']
-if word_count < 8 or text.lower().strip() in SAFE_PATTERNS:
+    word_count = len(text.split())
+    SAFE_PATTERNS = ['hi', 'hey', 'hello', 'ok', 'okay', 'thanks', 'thank you',
+                     'yes', 'no', 'sure', 'noted', 'alright', 'bye', 'goodbye']
+    if word_count < 8 or text.lower().strip() in SAFE_PATTERNS:
         return jsonify({
             'result': 'SAFE',
             'confidence': 50.0,
