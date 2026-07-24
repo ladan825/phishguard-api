@@ -5,8 +5,8 @@ import numpy as np
 import sqlite3
 from datetime import datetime
 import os
+import re
 import gdown
-import traceback
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -15,7 +15,7 @@ CORS(app, origins=[
     "https://phishguard-gamma-ten.vercel.app",
 ])
 
-THRESHOLD = 0.70
+THRESHOLD = 0.65
 
 def download_models():
     if not os.path.exists('phishing_model.pkl'):
@@ -29,54 +29,12 @@ download_models()
 ensemble_model = joblib.load('phishing_model.pkl')
 tfidf_vectorizer = joblib.load('vectorizer.pkl')
 feature_names = np.array(tfidf_vectorizer.get_feature_names_out())
+rf_model = ensemble_model.named_estimators_['rf']
+lr_model = ensemble_model.named_estimators_['lr']
+rf_importances = rf_model.feature_importances_
+lr_coef = lr_model.coef_[0]
 print("Model loaded!")
 
-# ── Fast, SHAP-free word contributions ─────────────────────
-# SHAP's TreeExplainer for a 300-tree RF + 200-tree XGB was too heavy
-# for this host -- it caused repeated worker timeouts / OOM kills, even
-# built lazily on first request. This approach uses only cheap,
-# already-computed data: RF/XGB's built-in feature_importances_ (no
-# explainer construction, no per-request tree traversal) for magnitude,
-# combined with LR's real signed coefficients for direction. It's an
-# approximation, not exact Shapley values, but it's ensemble-aware
-# (uses your real voting weights) and directionally correct, with
-# effectively zero extra compute cost per request.
-rf_model = ensemble_model.named_estimators_['rf']
-xgb_model = ensemble_model.named_estimators_['xgb']
-lr_model = ensemble_model.named_estimators_['lr']
-ENSEMBLE_WEIGHTS = dict(zip([name for name, _ in ensemble_model.estimators], ensemble_model.weights))
-TOTAL_WEIGHT = sum(ENSEMBLE_WEIGHTS.values())
-
-rf_importances = rf_model.feature_importances_
-xgb_importances = xgb_model.feature_importances_
-lr_coef = lr_model.coef_[0]
-
-# Combined magnitude weight per feature, using RF+XGB voting weights
-# (LR is excluded here since it already provides its own signed value)
-_rf_xgb_weight = ENSEMBLE_WEIGHTS['rf'] + ENSEMBLE_WEIGHTS['xgb']
-combined_importance = (
-    ENSEMBLE_WEIGHTS['rf'] * rf_importances +
-    ENSEMBLE_WEIGHTS['xgb'] * xgb_importances
-) / _rf_xgb_weight
-
-def get_word_contributions(vec):
-    """Returns [(word, signed_contribution), ...] for words present in
-    the email. Positive = pushes toward phishing. Sign comes from LR's
-    coefficient (the only submodel with a real signed weight); magnitude
-    comes from RF+XGB's feature importances, scaled by TF-IDF presence."""
-    tfidf_scores = vec.toarray()[0]
-    nonzero_idx = vec.nonzero()[1]
-
-    contributions = []
-    for i in nonzero_idx:
-        magnitude = tfidf_scores[i] * combined_importance[i]
-        direction = 1 if lr_coef[i] >= 0 else -1
-        contributions.append((feature_names[i], direction * magnitude))
-
-    contributions.sort(key=lambda x: -x[1])
-    return contributions
-
-# ── Database ───────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect('phishguard.db')
     c = conn.cursor()
@@ -113,72 +71,106 @@ def get_stats():
     conn.close()
     return {'total': total, 'phishing': phishing, 'safe': safe}
 
-# ── Signal categories for the narrative explanation ────────
-URGENCY = {'urgent', 'immediately', 'now', 'today', 'asap', 'quickly', 'fast', 'expire', 'expires', 'expiring', 'deadline', 'limited', 'hours', 'minutes'}
-THREAT = {'suspended', 'blocked', 'locked', 'terminated', 'closed', 'cancelled', 'deactivated', 'compromised', 'restricted', 'freeze', 'frozen'}
-ACTION = {'click', 'verify', 'confirm', 'update', 'submit', 'login', 'sign', 'enter', 'provide', 'send', 'fill'}
-SENSITIVE = {'password', 'pin', 'bvn', 'nin', 'account', 'card', 'credit', 'bank', 'details', 'credentials', 'otp', 'token'}
-REWARD = {'won', 'winner', 'prize', 'reward', 'gift', 'free', 'congratulations', 'selected', 'lucky', 'claim', 'bonus'}
-LEGITIMATE = {'meeting', 'schedule', 'agenda', 'regards', 'attached', 'document', 'seminar', 'assignment', 'lecture', 'department', 'office', 'colleague', 'team', 'portal', 'registration', 'session'}
+def get_keywords(vec, is_phishing):
+    tfidf_scores = vec.toarray()[0]
+    nonzero = np.where(tfidf_scores > 0)[0]
+    if len(nonzero) == 0:
+        return []
+    combined = tfidf_scores * rf_importances
+    if is_phishing:
+        top = nonzero[np.argsort(combined[nonzero])[::-1]][:5]
+    else:
+        top = nonzero[np.argsort(combined[nonzero])[::-1]][:5]
+    return [feature_names[i] for i in top]
 
-def generate_explanation(email_text, result, confidence, contributions):
-    """Generate a specific explanation grounded in the words that ACTUALLY
-    drove the ensemble's decision (SHAP contributions), not just any
-    category word appearing anywhere in the text."""
+# ── Signal dictionaries ────────────────────────────────────
+URGENCY = {'urgent', 'immediately', 'now', 'asap', 'quickly', 'expire',
+           'expires', 'expiring', 'deadline', 'limited', 'hours', 'within',
+           'today', 'tomorrow', 'minutes', 'before', 'friday', 'monday'}
+THREAT  = {'suspended', 'blocked', 'locked', 'terminated', 'closed',
+           'cancelled', 'deactivated', 'compromised', 'restricted',
+           'freeze', 'frozen', 'cancelled', 'malpractice'}
+ACTION  = {'click', 'verify', 'confirm', 'update', 'submit', 'login',
+           'sign', 'enter', 'provide', 'send', 'fill', 'appeal', 'claim'}
+SENSITIVE = {'password', 'pin', 'bvn', 'nin', 'account', 'card',
+             'credit', 'bank', 'details', 'credentials', 'otp', 'token',
+             'atm', 'number', 'ssn'}
+REWARD  = {'won', 'winner', 'prize', 'reward', 'gift', 'free',
+           'congratulations', 'selected', 'lucky', 'claim', 'bonus',
+           'relief', 'fund', 'payment', 'ngn', '500', '000'}
+URL_PATTERN = re.compile(r'http[s]?://\S+|www\.\S+')
+LEGITIMATE = {'meeting', 'schedule', 'agenda', 'regards', 'attached',
+              'document', 'seminar', 'assignment', 'lecture', 'department',
+              'office', 'colleague', 'team', 'portal', 'registration',
+              'session', 'hi', 'dear', 'hello', 'sincerely', 'best'}
+
+def generate_explanation(email_text, result, confidence, keywords):
     words = set(email_text.lower().split())
+    has_url = bool(URL_PATTERN.search(email_text))
 
-    found_urgency = words & URGENCY
-    found_threat = words & THREAT
-    found_action = words & ACTION
+    found_urgency  = words & URGENCY
+    found_threat   = words & THREAT
+    found_action   = words & ACTION
     found_sensitive = words & SENSITIVE
-    found_reward = words & REWARD
-    found_legit = words & LEGITIMATE
-
-    # Top words that actually pushed the decision, in the direction of the result
-    top_phishing_words = [w for w, s in contributions if s > 0][:3]
-    top_safe_words = [w for w, s in contributions if s < 0][:3]
+    found_reward   = words & REWARD
+    found_legit    = words & LEGITIMATE
 
     if result == 'PHISHING':
         signals = []
-        if found_urgency:
-            signals.append(f"urgency-creating language ({', '.join(list(found_urgency)[:2])})")
+
+        if has_url:
+            url = URL_PATTERN.search(email_text).group()
+            signals.append(f"an embedded suspicious URL ({url[:40]})")
         if found_threat:
             signals.append(f"account threat language ({', '.join(list(found_threat)[:2])})")
+        if found_urgency:
+            signals.append(f"urgency-creating language ({', '.join(list(found_urgency)[:2])})")
         if found_reward:
-            signals.append(f"reward or prize language ({', '.join(list(found_reward)[:2])})")
+            signals.append(f"reward or financial enticement language ({', '.join(list(found_reward)[:2])})")
         if found_action and found_sensitive:
-            signals.append(f"requests for sensitive action ({', '.join(list(found_action)[:1])} + {', '.join(list(found_sensitive)[:1])})")
+            signals.append(f"a request to {list(found_action)[0]} sensitive data ({', '.join(list(found_sensitive)[:2])})")
+        elif found_sensitive:
+            signals.append(f"references to sensitive personal data ({', '.join(list(found_sensitive)[:2])})")
         elif found_action:
             signals.append(f"suspicious calls to action ({', '.join(list(found_action)[:2])})")
-        if found_sensitive:
-            signals.append(f"references to sensitive information ({', '.join(list(found_sensitive)[:2])})")
 
-        if not signals and top_phishing_words:
-            signals.append(f'specific terms the model weighed heavily, including "{", ".join(top_phishing_words)}"')
-        elif not signals:
-            signals.append("overall linguistic patterns matching known phishing templates")
+        if not signals:
+            kw = ', '.join(f'"{w}"' for w in keywords[:3])
+            signals.append(f"linguistic patterns the model flagged, including {kw}")
 
-        signal_text = ' and '.join(signals[:2]) if len(signals) >= 2 else signals[0]
+        top2 = signals[:2]
+        signal_text = ' combined with '.join(top2) if len(top2) == 2 else top2[0]
 
         if confidence >= 90:
-            return f"This email is highly likely to be a phishing attempt. It contains {signal_text}, which are strong indicators of social engineering designed to deceive the recipient into taking harmful action. Do not interact with any links or attachments."
+            return (f"This email is highly likely to be a phishing attempt ({confidence}% confidence). "
+                    f"It contains {signal_text} — a combination strongly associated with social engineering "
+                    f"attacks designed to deceive recipients into disclosing sensitive information or taking harmful action.")
         elif confidence >= 75:
-            return f"This email shows significant phishing characteristics. The presence of {signal_text} are patterns commonly used by attackers to create false urgency or fear, manipulating recipients into disclosing sensitive information or clicking malicious links."
+            return (f"This email shows significant phishing indicators ({confidence}% confidence). "
+                    f"The presence of {signal_text} are patterns commonly used by attackers to manipulate "
+                    f"recipients through false urgency, fear, or reward — do not click any links or provide personal data.")
         else:
-            return f"This email was flagged as potentially suspicious due to {signal_text}. While the confidence is moderate at {confidence}%, these patterns are associated with phishing attempts — verify the sender's identity through official channels before responding."
+            return (f"This email was flagged as potentially suspicious ({confidence}% confidence). "
+                    f"It contains {signal_text}, which overlap with known phishing patterns. "
+                    f"Verify the sender through official channels before responding.")
 
     else:
         if found_legit:
-            legit_text = ', '.join(list(found_legit)[:3])
-            return f"This email appears legitimate. It contains contextually appropriate institutional or professional language ({legit_text}) without the urgency, threats, or suspicious calls to action typically found in phishing emails. The overall tone and content are consistent with genuine communication."
-        elif top_safe_words:
-            return f"This email appears legitimate with {confidence}% confidence. Terms like \"{', '.join(top_safe_words)}\" weighed most heavily toward a safe classification, and the message lacks the urgency, threats, or requests for sensitive data typically seen in phishing attempts."
+            legit_words = ', '.join(list(found_legit)[:3])
+            return (f"This email appears legitimate ({confidence}% confidence). "
+                    f"It contains professional or institutional language ({legit_words}) "
+                    f"and does not exhibit the urgency, threats, suspicious URLs, or requests "
+                    f"for sensitive data that characterise phishing emails.")
         elif confidence >= 80:
-            return f"This email appears legitimate with {confidence}% confidence. Its language and structure are consistent with normal communication patterns and do not exhibit the deceptive characteristics associated with phishing attempts."
+            return (f"This email appears legitimate ({confidence}% confidence). "
+                    f"Its tone and content are consistent with normal communication and do not "
+                    f"match the deceptive patterns — such as account threats, reward claims, or "
+                    f"urgent requests for personal data — associated with phishing attacks.")
         else:
-            return f"This email is likely safe but the classification is borderline at {confidence}% confidence. It does not strongly match phishing patterns, however some ambiguous language was detected. Verify the sender's identity before sharing any sensitive information or clicking links."
+            return (f"This email is likely safe but borderline ({confidence}% confidence). "
+                    f"It does not strongly match phishing patterns, however some ambiguous "
+                    f"language is present — verify the sender before sharing sensitive information.")
 
-# ── Routes ─────────────────────────────────────────────────
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -188,7 +180,11 @@ def predict():
             return jsonify({'error': 'No text provided'}), 400
 
         word_count = len(text.split())
-        SAFE_GREETINGS = {'hi', 'hey', 'hello', 'ok', 'okay', 'thanks', 'thank you', 'yes', 'no', 'sure', 'noted', 'alright', 'bye', 'goodbye', 'good morning', 'good afternoon', 'good evening'}
+        SAFE_GREETINGS = {
+            'hi', 'hey', 'hello', 'ok', 'okay', 'thanks', 'thank you',
+            'yes', 'no', 'sure', 'noted', 'alright', 'bye', 'goodbye',
+            'good morning', 'good afternoon', 'good evening'
+        }
         if word_count < 8 or text.lower().strip() in SAFE_GREETINGS:
             return jsonify({
                 'result': 'SAFE',
@@ -203,10 +199,8 @@ def predict():
         is_phishing = prob_phishing >= THRESHOLD
         confidence = round(float(prob_phishing if is_phishing else 1 - prob_phishing) * 100, 2)
         result = 'PHISHING' if is_phishing else 'SAFE'
-
-        contributions = get_word_contributions(vec)
-        keywords = [w for w, s in (contributions if is_phishing else contributions[::-1])][:5]
-        explanation = generate_explanation(text, result, confidence, contributions)
+        keywords = get_keywords(vec, is_phishing)
+        explanation = generate_explanation(text, result, confidence, keywords)
 
         save_prediction(text, result, confidence, keywords, explanation)
 
@@ -218,12 +212,8 @@ def predict():
             'probability': round(float(prob_phishing) * 100, 2)
         })
     except Exception as e:
-        # TEMPORARY: return the real error so we can see exactly what broke.
-        # Remove the 'trace' field once this is confirmed working.
-        return jsonify({
-            'error': str(e),
-            'trace': traceback.format_exc()
-        }), 500
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 @app.route('/stats', methods=['GET'])
 def stats():
@@ -253,7 +243,7 @@ def history():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'running', 'version': '7.0'})
+    return jsonify({'status': 'running', 'version': '8.0'})
 
 if __name__ == '__main__':
     init_db()
