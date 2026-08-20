@@ -23,7 +23,7 @@ def download_models():
         gdown.download('https://drive.google.com/uc?id=12-5oQOOYI2C9CL4eodWa2q3zrqW1KSIh', 'phishing_model.pkl', quiet=False)
     if not os.path.exists('vectorizer.pkl'):
         print("Downloading vectorizer...")
-        gdown.download('https://drive.google.com/file/d/1R_1ke4Z5za379zX5yyHBtr2UOBCE2Fst', 'vectorizer.pkl', quiet=False)
+        gdown.download('https://drive.google.com/uc?id=1R_1ke4Z5za379zX5yyHBtr2UOBCE2Fst', 'vectorizer.pkl', quiet=False)
 
 download_models()
 ensemble_model = joblib.load('phishing_model.pkl')
