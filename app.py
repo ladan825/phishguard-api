@@ -20,10 +20,10 @@ THRESHOLD = 0.65
 def download_models():
     if not os.path.exists('phishing_model.pkl'):
         print("Downloading model...")
-        gdown.download('https://drive.google.com/uc?id=1StF2zFfEEFyNWGMvR0IdTYcVmYcbzDcZ', 'phishing_model.pkl', quiet=False)
+        gdown.download('https://drive.google.com/uc?id=12-5oQOOYI2C9CL4eodWa2q3zrqW1KSIh', 'phishing_model.pkl', quiet=False)
     if not os.path.exists('vectorizer.pkl'):
         print("Downloading vectorizer...")
-        gdown.download('https://drive.google.com/uc?id=1xh2cKcALIgmS6mvkDPYCWjxR9qAl4uUs', 'vectorizer.pkl', quiet=False)
+        gdown.download('https://drive.google.com/file/d/1R_1ke4Z5za379zX5yyHBtr2UOBCE2Fst', 'vectorizer.pkl', quiet=False)
 
 download_models()
 ensemble_model = joblib.load('phishing_model.pkl')
